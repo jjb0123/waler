@@ -13,7 +13,7 @@ int main () {
 
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET; // IPv4
-    server_addr.sin_port = htons(9000);
+    server_addr.sin_port = htons(9000); // converts unsigned integer to network byte order (big-endian) 
     server_addr.sin_addr.s_addr = INADDR_ANY; // Listen on all interfaces 
 
     if (bind(sockfd, reinterpret_cast<sockaddr*>(&server_addr), sizeof(server_addr)) < 0) {
@@ -23,11 +23,10 @@ int main () {
     }
     
     std::cout << "UDP pong server listening on port 9000\n";
-
     char buffer[1024];
 
     while (true) {
-        sockaddr_in client_addr{};
+        sockaddr_in client_addr{}; //socket
         socklen_t client_addr_len = sizeof(client_addr);
 
         ssize_t n = recvfrom(
@@ -40,15 +39,15 @@ int main () {
         );
 
         if (n < 0) {
-            std:cerr << "Failed to receive data" << std::endl;
+            std::cerr << "Failed to receive data" << std::endl;
             continue;
         }
 
-        const char* pong = "pong";
+        // const char* pong = "pong";
         ssize_t sent = sendto(
             sockfd,
-            pong,
-            strlen(pong), // no need to send null terminator
+            buffer,
+            n, // send back the same number of bytes received
             0, // no flags
             reinterpret_cast<sockaddr*>(&client_addr),
             client_addr_len
