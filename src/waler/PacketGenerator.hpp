@@ -14,6 +14,8 @@
 #include <string_view>
 #include <sys/types.h>
 
+#include <waler/MarketData.hpp>
+
 namespace waler {
 
 class PacketGenerator {
@@ -23,47 +25,11 @@ public:
   static constexpr std::int32_t kInitialMidPrice = 15000;
   static constexpr std::uint32_t kDefaultRate = 1000;
   static constexpr std::uint32_t kMaxOrderId = 0xffffffffU;
-  static constexpr std::size_t kMaxSymbolLen = 8;
+  static constexpr std::size_t kMaxSymbolLen = market_data::kSymbolLen;
   static constexpr std::size_t kRestingPool = 512;
   static constexpr double kLambdaLimit = 0.50;
   static constexpr double kLambdaCancel = 0.30;
   static constexpr double kLambdaMarket = 0.20;
-
-#pragma pack(push, 1)
-  struct AddOrderMessage {
-    std::uint8_t msg_type;
-    std::uint64_t timestamp_ns;
-    std::uint32_t order_id;
-    std::uint8_t side;
-    std::uint32_t price;
-    std::uint32_t quantity;
-    char symbol[kMaxSymbolLen];
-  };
-
-  struct CancelOrderMessage {
-    std::uint8_t msg_type;
-    std::uint64_t timestamp_ns;
-    std::uint32_t order_id;
-    std::uint32_t quantity;
-  };
-
-  struct ExecuteMessage {
-    std::uint8_t msg_type;
-    std::uint64_t timestamp_ns;
-    std::uint32_t order_id;
-    std::uint32_t exec_qty;
-    std::uint32_t exec_price;
-  };
-
-  struct QuoteMessage {
-    std::uint8_t msg_type;
-    std::uint64_t timestamp_ns;
-    std::uint32_t bid_price;
-    std::uint32_t bid_qty;
-    std::uint32_t ask_price;
-    std::uint32_t ask_qty;
-  };
-#pragma pack(pop)
 
   struct Config {
     std::uint32_t rate = kDefaultRate;
@@ -94,19 +60,19 @@ public:
     }
 
     for (int attempts = 0; attempts < 4; ++attempts) {
-      const int event = drawEvent();
+      const EventKind event = drawEvent();
       ssize_t len = -1;
       switch (event) {
-        case 0:
+        case EventKind::AddOrder:
           len = buildAddOrder(dst, capacity);
           break;
-        case 1:
+        case EventKind::CancelOrder:
           len = buildCancelOrder(dst, capacity);
           break;
-        case 2:
+        case EventKind::Execute:
           len = buildExecute(dst, capacity);
           break;
-        case 3:
+        case EventKind::Quote:
           len = buildQuote(dst, capacity);
           break;
       }
@@ -121,6 +87,13 @@ public:
   }
 
 private:
+  enum class EventKind {
+    AddOrder,
+    CancelOrder,
+    Execute,
+    Quote,
+  };
+
   struct RestingOrder {
     std::uint32_t order_id = 0;
     std::uint32_t price = 0;
@@ -223,20 +196,20 @@ private:
     return static_cast<ssize_t>(packet_size);
   }
 
-  [[nodiscard]] int drawEvent() {
+  [[nodiscard]] EventKind drawEvent() {
     constexpr double quote_weight = 0.1;
     const double total = kLambdaLimit + kLambdaCancel + kLambdaMarket + quote_weight;
     const double r = event_dist_(rng_) * total;
     if (r < kLambdaLimit) {
-      return 0;
+      return EventKind::AddOrder;
     }
     if (r < (kLambdaLimit + kLambdaCancel)) {
-      return 1;
+      return EventKind::CancelOrder;
     }
     if (r < (kLambdaLimit + kLambdaCancel + kLambdaMarket)) {
-      return 2;
+      return EventKind::Execute;
     }
-    return 3;
+    return EventKind::Quote;
   }
 
   [[nodiscard]] ssize_t buildAddOrder(std::uint8_t* dst, std::size_t capacity) {
@@ -254,8 +227,8 @@ private:
 
     resting_[resting_count_++] = RestingOrder{oid, price, qty, side};
 
-    AddOrderMessage message{};
-    message.msg_type = 'A';
+    market_data::AddOrderMessage message{};
+    message.msg_type = market_data::kAddOrderType;
     message.timestamp_ns = toNetwork64(nowNs());
     message.order_id = toNetwork32(oid);
     message.side = side;
@@ -276,8 +249,8 @@ private:
     resting_[idx] = resting_[resting_count_ - 1];
     --resting_count_;
 
-    CancelOrderMessage message{};
-    message.msg_type = 'X';
+    market_data::CancelOrderMessage message{};
+    message.msg_type = market_data::kCancelOrderType;
     message.timestamp_ns = toNetwork64(nowNs());
     message.order_id = toNetwork32(oid);
     message.quantity = 0;
@@ -316,8 +289,8 @@ private:
       order.quantity -= exec_qty;
     }
 
-    ExecuteMessage message{};
-    message.msg_type = 'E';
+    market_data::ExecuteMessage message{};
+    message.msg_type = market_data::kExecuteType;
     message.timestamp_ns = toNetwork64(nowNs());
     message.order_id = toNetwork32(order_id);
     message.exec_qty = toNetwork32(exec_qty);
@@ -350,8 +323,8 @@ private:
       best_ask = static_cast<std::uint32_t>(mid_price_ + static_cast<std::int32_t>(kTickSize));
     }
 
-    QuoteMessage message{};
-    message.msg_type = 'Q';
+    market_data::QuoteMessage message{};
+    message.msg_type = market_data::kQuoteType;
     message.timestamp_ns = toNetwork64(nowNs());
     message.bid_price = toNetwork32(best_bid);
     message.bid_qty = toNetwork32(bid_qty);
@@ -360,10 +333,5 @@ private:
     return writeMessage(dst, capacity, message);
   }
 };
-
-static_assert(sizeof(PacketGenerator::AddOrderMessage) == 30);
-static_assert(sizeof(PacketGenerator::CancelOrderMessage) == 17);
-static_assert(sizeof(PacketGenerator::ExecuteMessage) == 21);
-static_assert(sizeof(PacketGenerator::QuoteMessage) == 25);
 
 }  // namespace waler
