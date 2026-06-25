@@ -23,7 +23,7 @@ int main(int argc, char **argv) {
     // clear the console.
     printf("\033[2J\033[H");
     // ob.printAnsi(stdout, 25);
-    ob.printDepthChart(stdout, 24, 24);
+    ob.printDepthChart(stdout, 36, 36);
     usleep(10000);
   }
 

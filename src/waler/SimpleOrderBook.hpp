@@ -123,7 +123,7 @@ public:
     }
   }
 
-  void printDepthChart(std::FILE* out = stdout, std::size_t depth = 10, std::size_t width = 24) const {
+  void printDepthChart(std::FILE* out = stdout, std::size_t rows = 10, std::size_t width = 24) const {
     if (out == nullptr) {
       return;
     }
@@ -133,21 +133,20 @@ public:
     static constexpr const char* kAsk = "\033[31m";
     static constexpr const char* kHeader = "\033[1;37m";
     static constexpr const char* kDim = "\033[2m";
+    static constexpr const char* kRowEven = "\033[48;5;236m";
+    static constexpr const char* kRowOdd = "\033[48;5;237m";
 
     struct DepthLevel {
       PriceCents price = 0;
       std::uint64_t cumulative_qty = 0;
     };
 
-    const std::size_t chart_height = width == 0 ? 1 : width;
-    const int hist_width = static_cast<int>(depth * 2 + 1);
-    const int data_width = 45;
-
+    const std::size_t chart_width = width == 0 ? 1 : width;
     std::vector<DepthLevel> ask_depth;
-    ask_depth.reserve(depth);
+    ask_depth.reserve(rows);
     std::uint64_t ask_cumulative = 0;
     for (const auto& [price, qty] : asks_) {
-      if (ask_depth.size() >= depth) {
+      if (ask_depth.size() >= rows) {
         break;
       }
       ask_cumulative += qty;
@@ -155,10 +154,10 @@ public:
     }
 
     std::vector<DepthLevel> bid_depth;
-    bid_depth.reserve(depth);
+    bid_depth.reserve(rows);
     std::uint64_t bid_cumulative = 0;
     for (const auto& [price, qty] : bids_) {
-      if (bid_depth.size() >= depth) {
+      if (bid_depth.size() >= rows) {
         break;
       }
       bid_cumulative += qty;
@@ -176,101 +175,73 @@ public:
       max_cumulative = 1;
     }
 
-    std::fprintf(out, "%s%-*s | %-*s%s\n",
+    std::fprintf(out, "%s%10s | %10s | %*s||%-*s | %10s | %10s%s\n",
                  kHeader,
-                 hist_width,
-                 "MARKET DEPTH",
-                 data_width,
-                 "RAW DEPTH",
-                 kReset);
-    std::fprintf(out, "%s%*s | %10s %10s %10s %10s%s\n",
-                 kDim,
-                 hist_width,
-                 "BIDS|ASKS",
                  "BID QTY",
                  "BID PX",
-                 "ASK QTY",
+                 static_cast<int>(chart_width),
+                 "BID DEPTH",
+                 static_cast<int>(chart_width),
+                 "ASK DEPTH",
                  "ASK PX",
+                 "ASK QTY",
                  kReset);
 
-    std::vector<std::size_t> bid_heights(depth, 0);
-    for (std::size_t i = 0; i < bid_depth.size(); ++i) {
-      bid_heights[i] = static_cast<std::size_t>((bid_depth[i].cumulative_qty * chart_height) / max_cumulative);
-      if (bid_heights[i] == 0 && bid_depth[i].cumulative_qty > 0) {
-        bid_heights[i] = 1;
-      }
-    }
+    for (std::size_t row = 0; row < rows; ++row) {
+      const char* row_bg = (row % 2U) == 0U ? kRowEven : kRowOdd;
+      const bool has_bid = row < bid_depth.size();
+      const bool has_ask = row < ask_depth.size();
+      const std::size_t bid_bar_width = has_bid
+          ? std::max<std::size_t>(1, (bid_depth[row].cumulative_qty * chart_width) / max_cumulative)
+          : 0;
+      const std::size_t ask_bar_width = has_ask
+          ? std::max<std::size_t>(1, (ask_depth[row].cumulative_qty * chart_width) / max_cumulative)
+          : 0;
 
-    std::vector<std::size_t> ask_heights(depth, 0);
-    for (std::size_t i = 0; i < ask_depth.size(); ++i) {
-      ask_heights[i] = static_cast<std::size_t>((ask_depth[i].cumulative_qty * chart_height) / max_cumulative);
-      if (ask_heights[i] == 0 && ask_depth[i].cumulative_qty > 0) {
-        ask_heights[i] = 1;
-      }
-    }
-
-    const std::size_t total_rows = std::max(chart_height, depth);
-    for (std::size_t row = 0; row < total_rows; ++row) {
-      if (row < chart_height) {
-        const std::size_t threshold = chart_height - row;
-        for (std::size_t col = depth; col > 0; --col) {
-          const std::size_t level_index = col - 1;
-          if (level_index < bid_depth.size() && bid_heights[level_index] >= threshold) {
-            std::fprintf(out, "%s#%s", kBid, kReset);
-          } else {
-            std::fputc(' ', out);
-          }
-        }
-
-        std::fprintf(out, "%s|%s", kDim, kReset);
-
-        for (std::size_t level_index = 0; level_index < depth; ++level_index) {
-          if (level_index < ask_depth.size() && ask_heights[level_index] >= threshold) {
-            std::fprintf(out, "%s#%s", kAsk, kReset);
-          } else {
-            std::fputc(' ', out);
-          }
-        }
+      if (has_bid) {
+        std::fprintf(out, "%s%s%10llu | %10.2f | %s",
+                     row_bg,
+                     kBid,
+                     static_cast<unsigned long long>(bid_depth[row].cumulative_qty),
+                     static_cast<double>(bid_depth[row].price) / 100.0,
+                     kReset);
       } else {
-        std::fprintf(out, "%*s", hist_width, "");
+        std::fprintf(out, "%s%10s | %10s | %s", row_bg, "", "", kReset);
       }
 
-      std::fprintf(out, " | ");
+      std::fprintf(out, "%s%s", row_bg, kBid);
+      for (std::size_t i = 0; i < chart_width - bid_bar_width; ++i) {
+        std::fputc(' ', out);
+      }
+      for (std::size_t i = 0; i < bid_bar_width; ++i) {
+        std::fputc('#', out);
+      }
+      std::fprintf(out, "%s", kReset);
 
-      if (row < depth) {
-        const bool has_bid = row < bid_depth.size();
-        const bool has_ask = row < ask_depth.size();
-        if (has_bid) {
-          std::fprintf(out, "%10llu %10.2f",
-                       static_cast<unsigned long long>(bid_depth[row].cumulative_qty),
-                       static_cast<double>(bid_depth[row].price) / 100.0);
-        } else {
-          std::fprintf(out, "%10s %10s", "", "");
-        }
+      std::fprintf(out, "%s%s||%s", row_bg, kDim, kReset);
 
-        std::fprintf(out, " ");
+      std::fprintf(out, "%s%s", row_bg, kAsk);
+      for (std::size_t i = 0; i < ask_bar_width; ++i) {
+        std::fputc('#', out);
+      }
+      for (std::size_t i = 0; i < chart_width - ask_bar_width; ++i) {
+          std::fputc(' ', out);
+      }
+      std::fprintf(out, "%s", kReset);
 
-        if (has_ask) {
-          std::fprintf(out, "%10llu %10.2f",
-                       static_cast<unsigned long long>(ask_depth[row].cumulative_qty),
-                       static_cast<double>(ask_depth[row].price) / 100.0);
-        } else {
-          std::fprintf(out, "%10s %10s", "", "");
-        }
+      if (has_ask) {
+        std::fprintf(out, "%s%s | %10.2f | %10llu%s",
+                     row_bg,
+                     kAsk,
+                     static_cast<double>(ask_depth[row].price) / 100.0,
+                     static_cast<unsigned long long>(ask_depth[row].cumulative_qty),
+                     kReset);
+      } else {
+        std::fprintf(out, "%s | %10s | %10s%s", row_bg, "", "", kReset);
       }
 
       std::fputc('\n', out);
     }
-
-    std::fprintf(out, "%s", kDim);
-    for (std::size_t i = 0; i < depth; ++i) {
-      std::fputc('-', out);
-    }
-    std::fputc('+', out);
-    for (std::size_t i = 0; i < depth; ++i) {
-      std::fputc('-', out);
-    }
-    std::fprintf(out, "%s\n", kReset);
   }
 
   bool apply(const market_data::AddOrderMessage& message) {
