@@ -3,47 +3,55 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <waler/types.h>
+
 namespace waler::market_data {
 
 inline constexpr std::size_t kSymbolLen = 8;
 
-inline constexpr std::uint8_t kAddOrderType = 'A';
-inline constexpr std::uint8_t kCancelOrderType = 'X';
-inline constexpr std::uint8_t kExecuteType = 'E';
-inline constexpr std::uint8_t kQuoteType = 'Q';
+enum class MessageType : std::uint8_t {
+  AddOrder = 'A',
+  CancelOrder = 'X',
+  Execute = 'E',
+  Quote = 'Q',
+};
 
 #pragma pack(push, 1)
+struct MessageHeader {
+  MessageType msg_type;
+};
+
 struct AddOrderMessage {
-  std::uint8_t msg_type;
+  MessageHeader header;
   std::uint64_t timestamp_ns;
   std::uint32_t order_id;
   std::uint8_t side;
-  std::uint32_t price;
+  PriceCents price;
   std::uint32_t quantity;
   char symbol[kSymbolLen];
 };
 
 struct CancelOrderMessage {
-  std::uint8_t msg_type;
+  MessageHeader header;
   std::uint64_t timestamp_ns;
   std::uint32_t order_id;
   std::uint32_t quantity;
 };
 
 struct ExecuteMessage {
-  std::uint8_t msg_type;
+  MessageHeader header;
   std::uint64_t timestamp_ns;
   std::uint32_t order_id;
   std::uint32_t exec_qty;
-  std::uint32_t exec_price;
+  PriceCents exec_price;
 };
 
 struct QuoteMessage {
-  std::uint8_t msg_type;
+  MessageHeader header;
   std::uint64_t timestamp_ns;
-  std::uint32_t bid_price;
+  PriceCents bid_price;
   std::uint32_t bid_qty;
-  std::uint32_t ask_price;
+  PriceCents ask_price;
   std::uint32_t ask_qty;
 };
 #pragma pack(pop)

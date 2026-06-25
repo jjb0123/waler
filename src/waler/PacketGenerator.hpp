@@ -15,13 +15,14 @@
 #include <sys/types.h>
 
 #include <waler/MarketData.hpp>
+#include <waler/types.h>
 
 namespace waler {
 
 class PacketGenerator {
 public:
   static constexpr std::size_t kMaxBookDepth = 20;
-  static constexpr std::uint32_t kTickSize = 100;
+  static constexpr PriceCents kTickSize = 100;
   static constexpr std::int32_t kInitialMidPrice = 15000;
   static constexpr std::uint32_t kDefaultRate = 1000;
   static constexpr std::uint32_t kMaxOrderId = 0xffffffffU;
@@ -60,19 +61,19 @@ public:
     }
 
     for (int attempts = 0; attempts < 4; ++attempts) {
-      const EventKind event = drawEvent();
+      const market_data::MessageType event = drawEvent();
       ssize_t len = -1;
       switch (event) {
-        case EventKind::AddOrder:
+        case market_data::MessageType::AddOrder:
           len = buildAddOrder(dst, capacity);
           break;
-        case EventKind::CancelOrder:
+        case market_data::MessageType::CancelOrder:
           len = buildCancelOrder(dst, capacity);
           break;
-        case EventKind::Execute:
+        case market_data::MessageType::Execute:
           len = buildExecute(dst, capacity);
           break;
-        case EventKind::Quote:
+        case market_data::MessageType::Quote:
           len = buildQuote(dst, capacity);
           break;
       }
@@ -87,16 +88,9 @@ public:
   }
 
 private:
-  enum class EventKind {
-    AddOrder,
-    CancelOrder,
-    Execute,
-    Quote,
-  };
-
   struct RestingOrder {
     std::uint32_t order_id = 0;
-    std::uint32_t price = 0;
+    PriceCents price = 0;
     std::uint32_t quantity = 0;
     std::uint8_t side = 0;
   };
@@ -142,14 +136,14 @@ private:
     return static_cast<std::uint32_t>(q);
   }
 
-  [[nodiscard]] std::uint32_t randPrice(std::uint8_t side) {
+  [[nodiscard]] PriceCents randPrice(std::uint8_t side) {
     int dist = static_cast<int>(expRand(0.5) * static_cast<double>(kTickSize));
     dist = std::max(dist, static_cast<int>(kTickSize));
     dist = std::min(dist, static_cast<int>(kMaxBookDepth * kTickSize));
     if (side == 'B') {
-      return static_cast<std::uint32_t>(mid_price_ - dist);
+      return static_cast<PriceCents>(mid_price_ - dist);
     }
-    return static_cast<std::uint32_t>(mid_price_ + dist);
+    return static_cast<PriceCents>(mid_price_ + dist);
   }
 
   void evolveMid() {
@@ -196,20 +190,20 @@ private:
     return static_cast<ssize_t>(packet_size);
   }
 
-  [[nodiscard]] EventKind drawEvent() {
+  [[nodiscard]] market_data::MessageType drawEvent() {
     constexpr double quote_weight = 0.1;
     const double total = kLambdaLimit + kLambdaCancel + kLambdaMarket + quote_weight;
     const double r = event_dist_(rng_) * total;
     if (r < kLambdaLimit) {
-      return EventKind::AddOrder;
+      return market_data::MessageType::AddOrder;
     }
     if (r < (kLambdaLimit + kLambdaCancel)) {
-      return EventKind::CancelOrder;
+      return market_data::MessageType::CancelOrder;
     }
     if (r < (kLambdaLimit + kLambdaCancel + kLambdaMarket)) {
-      return EventKind::Execute;
+      return market_data::MessageType::Execute;
     }
-    return EventKind::Quote;
+    return market_data::MessageType::Quote;
   }
 
   [[nodiscard]] ssize_t buildAddOrder(std::uint8_t* dst, std::size_t capacity) {
@@ -218,7 +212,7 @@ private:
     }
 
     const std::uint8_t side = side_dist_(rng_) != 0 ? 'B' : 'S';
-    const std::uint32_t price = randPrice(side);
+    const PriceCents price = randPrice(side);
     const std::uint32_t qty = randQty();
     std::uint32_t oid = next_order_id_++;
     if (next_order_id_ == 0) {
@@ -228,7 +222,7 @@ private:
     resting_[resting_count_++] = RestingOrder{oid, price, qty, side};
 
     market_data::AddOrderMessage message{};
-    message.msg_type = market_data::kAddOrderType;
+    message.header.msg_type = market_data::MessageType::AddOrder;
     message.timestamp_ns = toNetwork64(nowNs());
     message.order_id = toNetwork32(oid);
     message.side = side;
@@ -250,7 +244,7 @@ private:
     --resting_count_;
 
     market_data::CancelOrderMessage message{};
-    message.msg_type = market_data::kCancelOrderType;
+    message.header.msg_type = market_data::MessageType::CancelOrder;
     message.timestamp_ns = toNetwork64(nowNs());
     message.order_id = toNetwork32(oid);
     message.quantity = 0;
@@ -259,7 +253,7 @@ private:
 
   [[nodiscard]] ssize_t buildExecute(std::uint8_t* dst, std::size_t capacity) {
     const std::uint8_t side = side_dist_(rng_) != 0 ? 'B' : 'S';
-    std::uint32_t best_price = side == 'B' ? 0U : std::numeric_limits<std::uint32_t>::max();
+    PriceCents best_price = side == 'B' ? 0U : std::numeric_limits<PriceCents>::max();
     ssize_t best_idx = -1;
 
     for (std::size_t i = 0; i < resting_count_; ++i) {
@@ -290,7 +284,7 @@ private:
     }
 
     market_data::ExecuteMessage message{};
-    message.msg_type = market_data::kExecuteType;
+    message.header.msg_type = market_data::MessageType::Execute;
     message.timestamp_ns = toNetwork64(nowNs());
     message.order_id = toNetwork32(order_id);
     message.exec_qty = toNetwork32(exec_qty);
@@ -299,8 +293,8 @@ private:
   }
 
   [[nodiscard]] ssize_t buildQuote(std::uint8_t* dst, std::size_t capacity) {
-    std::uint32_t best_bid = 0;
-    std::uint32_t best_ask = std::numeric_limits<std::uint32_t>::max();
+    PriceCents best_bid = 0;
+    PriceCents best_ask = std::numeric_limits<PriceCents>::max();
     std::uint32_t bid_qty = 0;
     std::uint32_t ask_qty = 0;
 
@@ -317,14 +311,14 @@ private:
     }
 
     if (best_bid == 0) {
-      best_bid = static_cast<std::uint32_t>(mid_price_ - static_cast<std::int32_t>(kTickSize));
+      best_bid = static_cast<PriceCents>(mid_price_ - static_cast<std::int32_t>(kTickSize));
     }
-    if (best_ask == std::numeric_limits<std::uint32_t>::max()) {
-      best_ask = static_cast<std::uint32_t>(mid_price_ + static_cast<std::int32_t>(kTickSize));
+    if (best_ask == std::numeric_limits<PriceCents>::max()) {
+      best_ask = static_cast<PriceCents>(mid_price_ + static_cast<std::int32_t>(kTickSize));
     }
 
     market_data::QuoteMessage message{};
-    message.msg_type = market_data::kQuoteType;
+    message.header.msg_type = market_data::MessageType::Quote;
     message.timestamp_ns = toNetwork64(nowNs());
     message.bid_price = toNetwork32(best_bid);
     message.bid_qty = toNetwork32(bid_qty);
