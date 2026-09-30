@@ -8,7 +8,7 @@
 namespace waler {
   void hexdump(const void *data, size_t size);
 
-  // Reads the MAC address of a local network interface (e.g. "enp1s0f0np0")
+  // Reads the MAC address of a local network interface (e.g. "enp65s0f0")
   // via SIOCGIFHWADDR. Aborts if the interface doesn't exist.
   [[nodiscard]] std::array<std::uint8_t, 6> getInterfaceMac(const std::string &ifname);
 }

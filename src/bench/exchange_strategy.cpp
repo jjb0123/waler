@@ -37,8 +37,8 @@
 
 namespace {
 
-constexpr const char* kExchangeIfname = "enp1s0f0np0";
-constexpr const char* kStrategyIfname = "enp1s0f1np1";
+constexpr const char* kExchangeIfname = "enp65s0f0";
+constexpr const char* kStrategyIfname = "enp65s0f1";
 constexpr const char* kExchangeIp     = "10.10.10.1";
 constexpr const char* kStrategyIp     = "10.10.10.2";
 constexpr std::uint16_t kUdpPort      = 30303;

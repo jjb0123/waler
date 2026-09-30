@@ -46,6 +46,13 @@ EfviInterface::EfviInterface(const std::string& ifname, const std::string& local
   prefix_len_ = ef_vi_receive_prefix_len(&vi_);
   slot_len_   = max_frame_len;
 
+  // The RX ring can hold fewer descriptors than requested (and one slot is
+  // always kept free), so posting rxq_capacity buffers can fail with EAGAIN.
+  const unsigned ring_cap = static_cast<unsigned>(ef_vi_receive_capacity(&vi_));
+  if (n_slots_ > ring_cap) {
+    n_slots_ = ring_cap;
+  }
+
   const size_t pool_bytes = slot_len_ * static_cast<size_t>(n_slots_);
   void* pool_mem = nullptr;
   if (posix_memalign(&pool_mem, 4096, pool_bytes) != 0) {

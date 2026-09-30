@@ -26,8 +26,8 @@
  * Build:
  *   gcc -O2 -Wall -o x4_loopback_latency x4_loopback_latency.c -lciul1 -lm
  *
- * Run (example, TX on enp1s0f0, RX on enp1s0f1, PHC of the NIC at ptp0):
- *   sudo taskset -c 3 ./x4_loopback_latency enp1s0f0 enp1s0f1 /dev/ptp0 100000
+ * Run (example, TX on enp65s0f0, RX on enp65s0f1, PHC of the NIC at ptp2):
+ *   sudo taskset -c 3 ./x4_loopback_latency enp65s0f0 enp65s0f1 /dev/ptp2 100000
  *
  * Notes / things to verify on your firmware+ciul version:
  *   - TX VI needs EF_VI_TX_TIMESTAMPS, RX VI needs EF_VI_RX_TIMESTAMPS.
@@ -300,13 +300,15 @@ static void report(const char* name, double* v, int n) {
 int main(int argc, char** argv) {
   if (argc < 5) {
     fprintf(stderr,
-      "usage: %s <tx-intf> <rx-intf> </dev/ptpN> <iters>\n", argv[0]);
+      "usage: %s <tx-intf> <rx-intf> </dev/ptpN> <iters> [samples.csv]\n",
+      argv[0]);
     return 1;
   }
   const char* tx_intf = argv[1];
   const char* rx_intf = argv[2];
   const char* phc_dev = argv[3];
   int iters = atoi(argv[4]);
+  const char* csv_path = argc > 5 ? argv[5] : NULL;
 
   int phc_fd = open(phc_dev, O_RDONLY);
   if (phc_fd < 0) { perror(phc_dev); return 1; }
@@ -362,7 +364,6 @@ int main(int argc, char** argv) {
   int n_ok = 0;
 
   ef_event evs[16];
-  ef_request_id ids[EF_VI_TRANSMIT_BATCH];
   int rx_next = 0;   /* which RX buffer id we expect next (FIFO order) */
 
   for (int it = 0; it < iters + WARMUP_ITERS; it++) {
@@ -465,6 +466,18 @@ int main(int argc, char** argv) {
     egress[n_ok]  = t1_ns - t0_ns;              /* cross-domain        */
     ingress[n_ok] = tmem_ns - t2_ns;            /* cross-domain        */
     n_ok++;
+  }
+
+  /* raw per-sample dump, before report() sorts the arrays in place */
+  if (csv_path) {
+    FILE* f = fopen(csv_path, "w");
+    if (!f) { perror(csv_path); return 1; }
+    fprintf(f, "wire,rtt_host,egress_plus_ingress,poll_delay,egress,ingress\n");
+    for (int i = 0; i < n_ok; i++)
+      fprintf(f, "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+              wire[i], rtt[i], eg_in[i], polld[i], egress[i], ingress[i]);
+    fclose(f);
+    printf("# wrote %d samples to %s\n", n_ok, csv_path);
   }
 
   printf("\n# exact (single clock domain):\n");

@@ -1,0 +1,14 @@
+# tsc ~ 2.844499 GHz, phc skew vs realtime: +2.224 ppm
+# rx mac = 74:27:2c:83:54:81
+# rx prefix = 14 bytes
+# wrote 100000 samples to /tank/jbrice/waler/benchmarks/nic/results/20260923-141730/samples.csv
+
+# exact (single clock domain):
+wire (T2-T1)       n=100000  min=   332.0 p50=   336.0 p90=   336.0 p99=   338.0 p99.9=   338.0 max=    338.0 mean=   335.7  (ns)
+rtt_host           n=100000  min=  1930.0 p50=  2056.0 p90=  2142.0 p99=  2324.0 p99.9=  2486.0 max=  11292.0 mean=  2074.0  (ns)
+egress+ingress     n=100000  min=  1594.0 p50=  1720.0 p90=  1808.0 p99=  1988.0 p99.9=  2150.0 max=  10956.0 mean=  1738.3  (ns)
+poll_delay         n=100000  min=   108.0 p50=   140.0 p90=   148.0 p99=   450.0 p99.9=   492.0 max=    722.0 mean=   146.9  (ns)
+
+# cross-domain (subject to clock-fit error, ~10s of ns):
+egress             n=100000  min=   500.0 p50=  1002.0 p90=  1184.0 p99=  1326.0 p99.9=  1448.0 max=  10250.0 mean=   995.5  (ns)
+ingress            n=100000  min=   280.0 p50=   730.0 p90=   962.0 p99=  1144.0 p99.9=  1244.0 max=   4624.0 mean=   740.7  (ns)
