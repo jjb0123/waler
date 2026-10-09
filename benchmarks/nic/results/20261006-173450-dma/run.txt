@@ -1,0 +1,18 @@
+# tsc ~ 2.844511 GHz, phc skew vs realtime: +2.440 ppm
+# tx mode = dma
+# datapath = enterprise
+# enp65s0f0: ctpio=unknown ctpio_only=0
+# rx mac = 74:27:2c:83:54:81
+# rx filter = mac
+# rx prefix = 14 bytes
+# wrote 100000 samples to /tank/jbrice/waler/benchmarks/nic/results/20261006-173450-dma/samples.csv
+
+# exact (single clock domain):
+wire (T2-T1)       n=100000  min=   336.0 p50=   337.5 p90=   338.0 p99=   338.0 p99.9=   338.5 max=    338.8 mean=   337.4  (ns)
+rtt_host           n=100000  min=  1933.9 p50=  2054.1 p90=  2154.3 p99=  2284.4 p99.9=  2454.9 max= 104761.8 mean=  2078.5  (ns)
+egress+ingress     n=100000  min=  1596.4 p50=  1716.9 p90=  1817.0 p99=  1947.4 p99.9=  2118.1 max= 104424.1 mean=  1741.1  (ns)
+poll_delay         n=100000  min=   100.2 p50=   140.3 p90=   150.5 p99=   470.7 p99.9=   491.1 max=   1973.6 mean=   152.9  (ns)
+
+# cross-domain (subject to clock-fit error, ~10s of ns):
+egress             n=100000  min=   541.4 p50=  1084.0 p90=  1309.0 p99=  1534.2 p99.9=  1711.2 max=   1957.5 mean=  1073.3  (ns)
+ingress            n=100000  min=    89.3 p50=   656.1 p90=   921.3 p99=  1083.3 p99.9=  1133.3 max= 103706.0 mean=   666.6  (ns)

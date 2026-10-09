@@ -1,0 +1,3 @@
+# tsc ~ 2.844500 GHz, phc skew vs realtime: -4.642 ppm
+# tx mode = ctpio, ct_threshold = 64 bytes
+# enp65s0f0: ctpio=unknown ctpio_only=0

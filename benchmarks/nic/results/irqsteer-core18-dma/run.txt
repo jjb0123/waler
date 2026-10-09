@@ -1,0 +1,16 @@
+# tsc ~ 2.844541 GHz, phc skew vs realtime: +10.261 ppm
+# tx mode = dma
+# enp65s0f0: ctpio=unknown ctpio_only=0
+# rx mac = 74:27:2c:83:54:81
+# rx prefix = 14 bytes
+# wrote 100000 samples to benchmarks/nic/results/irqsteer-core18-dma/samples.csv
+
+# exact (single clock domain):
+wire (T2-T1)       n=100000  min=   335.5 p50=   336.8 p90=   337.2 p99=   337.5 p99.9=   337.8 max=    338.0 mean=   336.8  (ns)
+rtt_host           n=100000  min=  1933.5 p50=  2053.8 p90=  2124.1 p99=  2284.4 p99.9=  2364.5 max=   4398.6 mean=  2062.8  (ns)
+egress+ingress     n=100000  min=  1596.5 p50=  1716.9 p90=  1787.6 p99=  1947.6 p99.9=  2028.0 max=   4061.9 mean=  1726.1  (ns)
+poll_delay         n=100000  min=   110.0 p50=   150.1 p90=   350.8 p99=   451.0 p99.9=   471.1 max=   2314.3 mean=   179.4  (ns)
+
+# cross-domain (subject to clock-fit error, ~10s of ns):
+egress             n=100000  min=   483.3 p50=  1091.3 p90=  1312.9 p99=  1491.0 p99.9=  1586.8 max=   1908.9 mean=  1074.7  (ns)
+ingress            n=100000  min=    74.9 p50=   637.7 p90=   932.2 p99=  1131.9 p99.9=  1234.1 max=   2773.9 mean=   651.6  (ns)

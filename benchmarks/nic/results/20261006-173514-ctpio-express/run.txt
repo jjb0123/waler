@@ -1,0 +1,5 @@
+# tsc ~ 2.844513 GHz, phc skew vs realtime: +5.018 ppm
+# tx mode = ctpio, ct_threshold = 64 bytes
+# datapath = express
+# enp65s0f0: ctpio=yes ctpio_only=1
+# rx mac = 74:27:2c:83:54:81

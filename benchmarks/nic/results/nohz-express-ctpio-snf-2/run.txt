@@ -1,0 +1,20 @@
+# tsc ~ 2.844505 GHz, phc skew vs realtime: -2.285 ppm
+# tx mode = ctpio-snf (store-and-forward, no poison)
+# datapath = express
+# enp65s0f0: ctpio=yes ctpio_only=1
+# rx mac = 74:27:2c:83:54:81
+# rx filter = udp 10.10.10.2:9000 (MAC filter unsupported)
+# rx prefix = 0 bytes
+# wrote 99951 samples to benchmarks/nic/results/nohz-express-ctpio-snf-2/samples.csv
+# express: 49 packets seen only via the RX event, 0 poisoned cut-through frames (both dropped)
+# ctpio fallbacks: 0 / 99951 (0.000%)
+
+# exact (single clock domain):
+wire (T2-T1)       n=99951   min=   336.8 p50=   337.8 p90=   338.5 p99=   338.8 p99.9=   338.8 max=    339.0 mean=   337.8  (ns)
+rtt_host           n=99951   min=  1071.9 p50=  1152.0 p90=  1162.2 p99=  1172.4 p99.9=  1212.2 max= 106936.2 mean=  1140.4  (ns)
+egress+ingress     n=99951   min=   734.1 p50=   813.3 p90=   824.5 p99=   834.9 p99.9=   874.5 max= 106598.9 mean=   802.5  (ns)
+poll_delay         n=99951   min=    20.0 p50=    40.1 p90=   130.4 p99=   360.7 p99.9=   511.2 max=    621.2 mean=    66.9  (ns)
+
+# cross-domain (subject to clock-fit error, ~10s of ns):
+egress             n=99951   min=   -99.9 p50=   360.2 p90=   547.7 p99=   668.8 p99.9=   723.5 max=   5190.4 mean=   359.1  (ns)
+ingress            n=99951   min=    18.0 p50=   436.0 p90=   635.4 p99=   782.5 p99.9=   845.7 max= 106261.1 mean=   443.5  (ns)

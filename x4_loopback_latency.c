@@ -23,11 +23,35 @@
  * composed with CLOCK_REALTIME <-> NIC PHC (/dev/ptpN, PTP_SYS_OFFSET_PRECISE
  * with PTP_SYS_OFFSET fallback). Both fits are refreshed periodically.
  *
+ * TX modes (-m):
+ *   dma        ef_vi_transmit(): NIC DMA-reads the frame from host memory
+ *              after the doorbell (default).
+ *   ctpio      cut-through PIO: the CPU writes the frame straight into the
+ *              NIC's CTPIO aperture and the NIC starts emitting it once
+ *              ct_threshold (-t, default 64) bytes have arrived. Frames can
+ *              be poisoned on the wire if the writes stall mid-frame.
+ *   ctpio-snf  CTPIO store-and-forward: whole frame buffered on the NIC
+ *              before it goes out, and never poisoned (EF_VI_TX_CTPIO_NO_POISON).
+ * In the CTPIO modes a DMA fallback frame is posted after every send; if the
+ * CTPIO send fails the NIC transmits that instead. Each TX completion says
+ * which path was used, so those samples are counted and flagged in the CSV
+ * (tx_ctpio column) rather than silently mixed in.
+ *
+ * Datapath (-x):
+ *   The X4 exposes two datapaths per port. The default (Enterprise) is the
+ *   ef10-style DMA datapath and does not offer CTPIO. -x opens both ports on
+ *   the Express (LLCT/efct) datapath instead: TX is CTPIO-only, so -x needs
+ *   -m ctpio or -m ctpio-snf. RX lands in kernel-managed shared buffers
+ *   rather than buffers we post, so T_mem comes from efct_vi_rx_future_peek()
+ *   (first EFCT_FUTURE_VALID_BYTES of the frame visible in host memory)
+ *   instead of the last-byte sentinel, and T3 is the RX_REF completion event.
+ *
  * Build:
  *   gcc -O2 -Wall -o x4_loopback_latency x4_loopback_latency.c -lciul1 -lm
  *
  * Run (example, TX on enp65s0f0, RX on enp65s0f1, PHC of the NIC at ptp2):
  *   sudo taskset -c 3 ./x4_loopback_latency enp65s0f0 enp65s0f1 /dev/ptp2 100000
+ *   sudo taskset -c 3 ./x4_loopback_latency -m ctpio enp65s0f0 enp65s0f1 /dev/ptp2 100000
  *
  * Notes / things to verify on your firmware+ciul version:
  *   - TX VI needs EF_VI_TX_TIMESTAMPS, RX VI needs EF_VI_RX_TIMESTAMPS.
@@ -54,6 +78,8 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <net/if.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <linux/ptp_clock.h>
 #include <x86intrin.h>
 
@@ -63,6 +89,7 @@
 #include <etherfabric/memreg.h>
 #include <etherfabric/ef_vi.h>
 #include <etherfabric/capabilities.h>
+#include <etherfabric/efct_vi.h>
 
 /* ------------------------------------------------------------------ */
 /* Configuration                                                       */
@@ -74,6 +101,9 @@
 #define WARMUP_ITERS   2000
 #define CAL_SAMPLES    64           /* samples per calibration pass */
 #define CAL_PERIOD     4096         /* re-calibrate every N iterations */
+#define CT_THRESH_DEF  64           /* default CTPIO cut-through threshold */
+
+typedef enum { TX_DMA, TX_CTPIO, TX_CTPIO_SNF } tx_mode_t;
 
 #define TRY(x)                                                          \
   do {                                                                  \
@@ -253,14 +283,45 @@ typedef struct {
   ef_addr          dma_base;
 } port_t;
 
-static void port_open(port_t* p, const char* intf, unsigned vi_flags) {
+static void port_open(port_t* p, const char* intf, unsigned vi_flags,
+                      int express) {
   int ifindex = if_nametoindex(intf);
   if (ifindex == 0) {
     fprintf(stderr, "no such interface: %s\n", intf);
     exit(1);
   }
   TRY(ef_driver_open(&p->dh));
-  TRY(ef_pd_alloc(&p->pd, p->dh, ifindex, EF_PD_DEFAULT));
+
+  /* Check up front so a missing CTPIO feature is a clear message rather
+   * than a bare ef_vi_alloc_from_pd failure. CTPIO_ONLY adapters (efct
+   * datapath) send everything through CTPIO, so "dma" mode there is really
+   * CTPIO store-and-forward -- worth knowing when comparing modes. */
+  if (vi_flags & EF_VI_TX_TIMESTAMPS) {
+    unsigned long ctpio = 0, ctpio_only = 0;
+    int cap_f = express ? EF_VI_CAP_F_LLCT : 0;
+    int rc = ef_vi_capabilities_get(p->dh, ifindex, EF_VI_CAP_CTPIO | cap_f,
+                                    &ctpio);
+    ef_vi_capabilities_get(p->dh, ifindex, EF_VI_CAP_CTPIO_ONLY | cap_f,
+                           &ctpio_only);
+    printf("# %s: ctpio=%s ctpio_only=%lu\n", intf,
+           rc < 0 ? "unknown" : ctpio ? "yes" : "no", ctpio_only);
+    if ((vi_flags & EF_VI_TX_CTPIO) && rc == 0 && !ctpio) {
+      fprintf(stderr, "%s: adapter/firmware does not offer CTPIO%s\n", intf,
+              express ? "" : " on this datapath (try -x for Express)");
+      exit(1);
+    }
+  }
+
+  if (express) {
+    unsigned long dp = 0;
+    if (ef_vi_capabilities_get(p->dh, ifindex, EF_VI_CAP_EXTRA_DATAPATHS,
+                               &dp) < 0 || !(dp & EF_VI_EXTRA_DATAPATH_EXPRESS)) {
+      fprintf(stderr, "%s: no Express datapath on this interface\n", intf);
+      exit(1);
+    }
+  }
+  TRY(ef_pd_alloc(&p->pd, p->dh, ifindex,
+                  express ? EF_PD_EXPRESS : EF_PD_DEFAULT));
   TRY(ef_vi_alloc_from_pd(&p->vi, p->dh, &p->pd, p->dh,
                           -1 /* evq */, -1 /* rxq */, -1 /* txq */,
                           NULL, -1, vi_flags));
@@ -297,18 +358,49 @@ static void report(const char* name, double* v, int n) {
 /* Main                                                                */
 /* ------------------------------------------------------------------ */
 
+static int usage(const char* prog) {
+  fprintf(stderr,
+    "usage: %s [-x] [-m dma|ctpio|ctpio-snf] [-t ct_threshold] "
+    "<tx-intf> <rx-intf> </dev/ptpN> <iters> [samples.csv]\n", prog);
+  return 1;
+}
+
 int main(int argc, char** argv) {
-  if (argc < 5) {
-    fprintf(stderr,
-      "usage: %s <tx-intf> <rx-intf> </dev/ptpN> <iters> [samples.csv]\n",
-      argv[0]);
+  tx_mode_t tx_mode = TX_DMA;
+  unsigned ct_thresh = CT_THRESH_DEF;
+  int express = 0;
+  int opt;
+  while ((opt = getopt(argc, argv, "m:t:x")) != -1) {
+    switch (opt) {
+    case 'x':
+      express = 1;
+      break;
+    case 'm':
+      if      (!strcmp(optarg, "dma"))       tx_mode = TX_DMA;
+      else if (!strcmp(optarg, "ctpio"))     tx_mode = TX_CTPIO;
+      else if (!strcmp(optarg, "ctpio-snf")) tx_mode = TX_CTPIO_SNF;
+      else { fprintf(stderr, "unknown tx mode: %s\n", optarg); return 1; }
+      break;
+    case 't':
+      ct_thresh = (unsigned)atoi(optarg);
+      break;
+    default:
+      return usage(argv[0]);
+    }
+  }
+  if (argc - optind < 4)
+    return usage(argv[0]);
+  if (express && tx_mode == TX_DMA) {
+    fprintf(stderr, "-x (Express) is CTPIO-only: use -m ctpio or -m ctpio-snf\n");
     return 1;
   }
-  const char* tx_intf = argv[1];
-  const char* rx_intf = argv[2];
-  const char* phc_dev = argv[3];
-  int iters = atoi(argv[4]);
-  const char* csv_path = argc > 5 ? argv[5] : NULL;
+  if (tx_mode == TX_CTPIO_SNF)
+    ct_thresh = EF_VI_CTPIO_CT_THRESHOLD_SNF;
+  const char* tx_intf = argv[optind + 0];
+  const char* rx_intf = argv[optind + 1];
+  const char* phc_dev = argv[optind + 2];
+  int iters = atoi(argv[optind + 3]);
+  const char* csv_path = argc - optind > 4 ? argv[optind + 4] : NULL;
 
   int phc_fd = open(phc_dev, O_RDONLY);
   if (phc_fd < 0) { perror(phc_dev); return 1; }
@@ -323,26 +415,53 @@ int main(int argc, char** argv) {
          tsc_hz / 1e9, (cm.rt2phc.a - 1.0) * 1e6);
 
   /* --- NIC setup --------------------------------------------------- */
+  unsigned tx_flags = EF_VI_TX_TIMESTAMPS;
+  if (tx_mode != TX_DMA)       tx_flags |= EF_VI_TX_CTPIO;
+  if (tx_mode == TX_CTPIO_SNF) tx_flags |= EF_VI_TX_CTPIO_NO_POISON;
+  if (tx_mode == TX_DMA)
+    printf("# tx mode = dma\n");
+  else if (tx_mode == TX_CTPIO)
+    printf("# tx mode = ctpio, ct_threshold = %u bytes\n", ct_thresh);
+  else
+    printf("# tx mode = ctpio-snf (store-and-forward, no poison)\n");
+  printf("# datapath = %s\n", express ? "express" : "enterprise");
+
   port_t tx, rx;
-  port_open(&tx, tx_intf, EF_VI_TX_TIMESTAMPS);
-  port_open(&rx, rx_intf, EF_VI_RX_TIMESTAMPS);
+  port_open(&tx, tx_intf, tx_flags, express);
+  port_open(&rx, rx_intf, EF_VI_RX_TIMESTAMPS, express);
 
   /* steer frames addressed to the RX port's MAC to our VI */
   uint8_t rx_mac[6];
   get_mac(rx_intf, rx_mac);
   printf("# rx mac = %02x:%02x:%02x:%02x:%02x:%02x\n",
          rx_mac[0], rx_mac[1], rx_mac[2], rx_mac[3], rx_mac[4], rx_mac[5]);
+  /* The frame is IPv4/UDP so that a UDP filter can stand in where the
+   * datapath rejects MAC filters. */
+  const uint32_t src_ip = 0x0a0a0a01, dst_ip = 0x0a0a0a02;  /* 10.10.10.1/.2 */
+  const uint16_t udp_port = 9000;
   ef_filter_spec fs;
   ef_filter_spec_init(&fs, EF_FILTER_FLAG_NONE);
   TRY(ef_filter_spec_set_eth_local(&fs, EF_FILTER_VLAN_ID_ANY, rx_mac));
-  TRY(ef_vi_filter_add(&rx.vi, rx.dh, &fs, NULL));
+  int frc = ef_vi_filter_add(&rx.vi, rx.dh, &fs, NULL);
+  if (frc == -EPROTONOSUPPORT || frc == -EOPNOTSUPP || frc == -EPROTO) {
+    ef_filter_spec_init(&fs, EF_FILTER_FLAG_NONE);
+    TRY(ef_filter_spec_set_ip4_local(&fs, IPPROTO_UDP, htonl(dst_ip),
+                                     htons(udp_port)));
+    TRY(ef_vi_filter_add(&rx.vi, rx.dh, &fs, NULL));
+    printf("# rx filter = udp 10.10.10.2:%u (MAC filter unsupported)\n",
+           udp_port);
+  } else {
+    TRY(frc);
+    printf("# rx filter = mac\n");
+  }
 
   unsigned rx_prefix = ef_vi_receive_prefix_len(&rx.vi);
   printf("# rx prefix = %u bytes\n", rx_prefix);
 
-  /* post RX buffers */
-  for (int i = 0; i < N_RX_BUFS; i++)
-    TRY(ef_vi_receive_post(&rx.vi, rx.dma_base + (ef_addr)i * BUF_SIZE, i));
+  /* post RX buffers (Express RX uses kernel-managed buffers instead) */
+  if (!express)
+    for (int i = 0; i < N_RX_BUFS; i++)
+      TRY(ef_vi_receive_post(&rx.vi, rx.dma_base + (ef_addr)i * BUF_SIZE, i));
 
   /* build the TX frame in the last buffer slot of the TX registration */
   uint8_t* txf = (uint8_t*)tx.buf_base + (size_t)N_RX_BUFS * BUF_SIZE;
@@ -350,8 +469,28 @@ int main(int argc, char** argv) {
   memset(txf, 0, PKT_LEN);
   memcpy(txf + 0, rx_mac, 6);               /* dst: the RX port's MAC */
   memset(txf + 6, 0x02, 6);                 /* src: locally administered */
-  txf[12] = 0x88; txf[13] = 0xb5;           /* experimental ethertype */
-  for (int i = 14; i < PKT_LEN; i++) txf[i] = (uint8_t)i;
+  txf[12] = 0x08; txf[13] = 0x00;           /* IPv4 */
+  uint8_t* ip = txf + 14;
+  uint16_t ip_len = PKT_LEN - 14;
+  ip[0] = 0x45; ip[8] = 64; ip[9] = IPPROTO_UDP;
+  ip[2] = ip_len >> 8; ip[3] = ip_len & 0xff;
+  for (int i = 0; i < 4; i++) {
+    ip[12 + i] = (uint8_t)(src_ip >> (24 - 8 * i));
+    ip[16 + i] = (uint8_t)(dst_ip >> (24 - 8 * i));
+  }
+  /* Express has no TX checksum offload, so the IP checksum must be valid;
+   * a UDP checksum of 0 means "none" in IPv4. */
+  uint32_t csum = 0;
+  for (int i = 0; i < 20; i += 2) csum += (ip[i] << 8) | ip[i + 1];
+  while (csum >> 16) csum = (csum & 0xffff) + (csum >> 16);
+  csum = ~csum & 0xffff;
+  ip[10] = csum >> 8; ip[11] = csum & 0xff;
+  uint8_t* udp = ip + 20;
+  uint16_t udp_len = ip_len - 20;
+  udp[0] = udp_port >> 8; udp[1] = udp_port & 0xff;
+  udp[2] = udp_port >> 8; udp[3] = udp_port & 0xff;
+  udp[4] = udp_len >> 8;  udp[5] = udp_len & 0xff;
+  for (int i = 42; i < PKT_LEN; i++) txf[i] = (uint8_t)i;
   txf[PKT_LEN - 1] = 0xa5;                  /* nonzero sentinel value */
 
   /* allocate result arrays */
@@ -361,7 +500,12 @@ int main(int argc, char** argv) {
   double* egress  = malloc(iters * sizeof(double));
   double* ingress = malloc(iters * sizeof(double));
   double* polld   = malloc(iters * sizeof(double));
+  uint64_t* t_send = malloc(iters * sizeof(uint64_t)); /* T0, raw TSC ticks */
+  uint8_t* via_ctpio = malloc(iters);        /* TX completion's CTPIO flag */
   int n_ok = 0;
+  int n_fallback = 0;                        /* measured CTPIO sends that fell back */
+  int n_missed_future = 0;                   /* Express RX seen only via the event */
+  int n_poisoned = 0;                        /* Express cut-through frames poisoned */
 
   ef_event evs[16];
   int rx_next = 0;   /* which RX buffer id we expect next (FIFO order) */
@@ -376,23 +520,78 @@ int main(int argc, char** argv) {
     int slot = rx_next % N_RX_BUFS;
     uint8_t* rxf = (uint8_t*)rx.buf_base + (size_t)slot * BUF_SIZE;
     volatile uint8_t* sentinel = rxf + rx_prefix + PKT_LEN - 1;
-    *sentinel = 0;                           /* arm the sentinel */
-    _mm_mfence();
+    if (!express) {
+      *sentinel = 0;                         /* arm the sentinel */
+      _mm_mfence();
+    }
 
     /* ---- T0 + transmit ---- */
     uint64_t t0 = tsc_now();
-    TRY(ef_vi_transmit(&tx.vi, txf_dma, PKT_LEN, it));
+    if (tx_mode == TX_DMA) {
+      TRY(ef_vi_transmit(&tx.vi, txf_dma, PKT_LEN, it));
+    } else {
+      /* The CTPIO write is the latency-critical part; the fallback post
+       * after it only matters if the NIC rejects the CTPIO frame. */
+      ef_vi_transmit_ctpio(&tx.vi, txf, PKT_LEN, ct_thresh);
+      TRY(ef_vi_transmit_ctpio_fallback(&tx.vi, txf_dma, PKT_LEN, it));
+    }
+
+    double t2_phc_ns = -1;
+    uint64_t t_mem = 0, t3 = 0;
+    int got_rx = 0;
+
+    /* ---- Express: future_peek for T_mem, RX_REF event for T3 + T2 ---- */
+    int missed_future = 0, poisoned = 0;
+    while (express && !got_rx) {
+      int n = 0;
+      for (;;) {
+        if (efct_vi_rx_future_peek(&rx.vi)) {
+          t_mem = tsc_now();
+          while ((n = efct_vi_rx_future_poll(&rx.vi, evs, 16)) == 0)
+            ;
+          break;
+        }
+        /* peek returns NULL while ef_vi has housekeeping events pending */
+        if (ef_eventq_has_event(&rx.vi) &&
+            (n = ef_eventq_poll(&rx.vi, evs, 16)) > 0)
+          break;
+      }
+      uint64_t t3_candidate = tsc_now();
+      for (int i = 0; i < n && !got_rx; i++) {
+        int type = EF_EVENT_TYPE(evs[i]);
+        if (type == EF_EVENT_TYPE_RX_REF) {
+          uint32_t pkt_id = evs[i].rx_ref.pkt_id;
+          const void* pkt = efct_vi_rxpkt_get(&rx.vi, pkt_id);
+          ef_precisetime pt;
+          TRY(ef_vi_receive_get_precise_timestamp(&rx.vi, pkt, &pt));
+          t2_phc_ns = (double)pt.tv_sec * 1e9 + (double)pt.tv_nsec
+                      + (double)pt.tv_nsec_frac / 65536.0;
+          efct_vi_rxpkt_release(&rx.vi, pkt_id);
+          t3 = t3_candidate;
+          if (t_mem == 0) { t_mem = t3; missed_future = 1; }
+          got_rx = 1;
+        } else if (type == EF_EVENT_TYPE_RX_REF_DISCARD) {
+          unsigned flags = evs[i].rx_ref_discard.flags;
+          efct_vi_rxpkt_release(&rx.vi, evs[i].rx_ref_discard.pkt_id);
+          /* A cut-through frame whose CTPIO writes stalled mid-frame goes
+           * out with a bad FCS. Expected now and then; drop the sample. */
+          if (tx_mode == TX_CTPIO && flags == EF_VI_DISCARD_RX_ETH_FCS_ERR) {
+            poisoned = 1;
+            got_rx = 1;
+          } else {
+            fprintf(stderr, "rx discard flags=0x%x\n", flags);
+            exit(1);
+          }
+        }
+      }
+    }
 
     /* ---- spin on payload byte for T_mem ---- */
-    uint64_t t_mem;
-    for (;;) {
+    while (!express) {
       if (*sentinel == 0xa5) { t_mem = tsc_now(); break; }
     }
 
     /* ---- poll RX event queue for T3 + T2 ---- */
-    double t2_phc_ns = -1;
-    uint64_t t3 = 0;
-    int got_rx = 0;
     while (!got_rx) {
       int n = ef_eventq_poll(&rx.vi, evs, 16);
       if (n == 0) continue;
@@ -413,8 +612,11 @@ int main(int argc, char** argv) {
           break;
         }
         case EF_EVENT_TYPE_RX_DISCARD:
-          fprintf(stderr, "rx discard type=%d\n",
-                  (int)EF_EVENT_RX_DISCARD_TYPE(evs[i]));
+          fprintf(stderr, "rx discard type=%d%s\n",
+                  (int)EF_EVENT_RX_DISCARD_TYPE(evs[i]),
+                  tx_mode == TX_CTPIO
+                    ? " (likely a poisoned cut-through frame: raise -t or"
+                      " use -m ctpio-snf)" : "");
           exit(1);
         default:
           break;
@@ -424,6 +626,7 @@ int main(int argc, char** argv) {
 
     /* ---- reap TX completion for T1 ---- */
     double t1_phc_ns = -1;
+    int tx_ctpio = 0;
     int got_tx = 0;
     while (!got_tx) {
       int n = ef_eventq_poll(&tx.vi, evs, 16);
@@ -436,12 +639,15 @@ int main(int argc, char** argv) {
           t1_phc_ns =
             (double)EF_EVENT_TX_WITH_TIMESTAMP_SEC(evs[i]) * 1e9 +
             (double)EF_EVENT_TX_WITH_TIMESTAMP_NSEC(evs[i]);
+          /* tx_timestamp shares the tx event layout up to flags */
+          tx_ctpio = EF_EVENT_TX_CTPIO(evs[i]) != 0;
           got_tx = 1;
           break;
         case EF_EVENT_TYPE_TX:
           fprintf(stderr,
             "got plain TX completion: TX timestamping not active "
-            "(firmware variant/license?)\n");
+            "(firmware variant/license?%s)\n",
+            tx_mode == TX_DMA ? "" : " or not supported together with CTPIO");
           exit(1);
         default:
           break;
@@ -451,6 +657,14 @@ int main(int argc, char** argv) {
 
     if (it < WARMUP_ITERS)
       continue;
+    if (missed_future) {                     /* no T_mem: drop the sample */
+      n_missed_future++;
+      continue;
+    }
+    if (poisoned) {
+      n_poisoned++;
+      continue;
+    }
 
     /* ---- derive ---- */
     double t0_ns    = tsc_ticks_to_ns(t0, tsc_hz);
@@ -463,8 +677,12 @@ int main(int argc, char** argv) {
     rtt[n_ok]     = tmem_ns - t0_ns;            /* same clock: exact   */
     eg_in[n_ok]   = rtt[n_ok] - wire[n_ok];     /* still sync-free     */
     polld[n_ok]   = t3_ns - tmem_ns;            /* same clock: exact   */
+    t_send[n_ok]  = t0;
     egress[n_ok]  = t1_ns - t0_ns;              /* cross-domain        */
     ingress[n_ok] = tmem_ns - t2_ns;            /* cross-domain        */
+    via_ctpio[n_ok] = (uint8_t)tx_ctpio;
+    if (tx_mode != TX_DMA && !tx_ctpio)
+      n_fallback++;
     n_ok++;
   }
 
@@ -472,12 +690,35 @@ int main(int argc, char** argv) {
   if (csv_path) {
     FILE* f = fopen(csv_path, "w");
     if (!f) { perror(csv_path); return 1; }
-    fprintf(f, "wire,rtt_host,egress_plus_ingress,poll_delay,egress,ingress\n");
+    fprintf(f, "wire,rtt_host,egress_plus_ingress,poll_delay,egress,ingress,"
+               "tx_ctpio,t_send\n");
+    /* t_send: T0 relative to the first sample (ns), to line outliers up
+     * against periodic sources such as the scheduler tick. Subtract in raw
+     * ticks, then scale once: converting absolute TSC values with each
+     * recalibrated tsc_hz shifts them by ms per ppm of frequency change. */
     for (int i = 0; i < n_ok; i++)
-      fprintf(f, "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
-              wire[i], rtt[i], eg_in[i], polld[i], egress[i], ingress[i]);
+      fprintf(f, "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,%.0f\n",
+              wire[i], rtt[i], eg_in[i], polld[i], egress[i], ingress[i],
+              via_ctpio[i], tsc_ticks_to_ns(t_send[i] - t_send[0], tsc_hz));
     fclose(f);
     printf("# wrote %d samples to %s\n", n_ok, csv_path);
+  }
+
+  if (express)
+    printf("# express: %d packets seen only via the RX event, %d poisoned "
+           "cut-through frames (both dropped)\n", n_missed_future, n_poisoned);
+  if (n_ok == 0) {
+    fprintf(stderr, "no valid samples%s\n", n_poisoned
+            ? ": every cut-through frame was poisoned; raise -t or use"
+              " -m ctpio-snf" : "");
+    return 1;
+  }
+
+  if (tx_mode != TX_DMA) {
+    printf("# ctpio fallbacks: %d / %d (%.3f%%)%s\n", n_fallback, n_ok,
+           100.0 * n_fallback / n_ok,
+           n_fallback ? " -- these went out via DMA and are included below;"
+                        " filter on tx_ctpio in the CSV" : "");
   }
 
   printf("\n# exact (single clock domain):\n");

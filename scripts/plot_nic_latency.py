@@ -13,6 +13,21 @@ import matplotlib.pyplot as plt
 outdir = sys.argv[1] if len(sys.argv) > 1 else '.'
 d = np.genfromtxt(os.path.join(outdir, 'samples.csv'), delimiter=',', names=True)
 
+# TX mode comes from x4_loopback_latency's "# tx mode = ..." line; runs from
+# before CTPIO support have no such line and were all DMA.
+mode = 'dma'
+try:
+    with open(os.path.join(outdir, 'run.txt')) as f:
+        for line in f:
+            if line.startswith('# tx mode = '):
+                mode = line.split('=', 1)[1].strip().split(',')[0].split(' ')[0]
+except OSError:
+    pass
+mode_label = f'tx={mode}'
+if mode != 'dma' and 'tx_ctpio' in d.dtype.names:
+    n_fb = int((d['tx_ctpio'] == 0).sum())
+    mode_label += f', {n_fb} DMA fallbacks' if n_fb else ', no fallbacks'
+
 # egress = TX doorbell -> wire departure, ingress = wire arrival -> DMA in
 # host memory. Both need a TSC<->PHC clock fit; their sum does not.
 SERIES = [
@@ -68,7 +83,7 @@ ax_c.set_title('tail CDF')
 ax_c.grid(True, alpha=0.3)
 ax_c.legend(fontsize=8)
 
-fig.suptitle('Solarflare X4 NIC egress / ingress latency (ef_vi, loopback)')
+fig.suptitle(f'Solarflare X4 NIC egress / ingress latency (ef_vi, loopback, {mode_label})')
 fig.tight_layout()
 fig.savefig(os.path.join(outdir, 'nic_latency.png'), dpi=150)
 print(f'wrote {outdir}/nic_latency.png, {outdir}/summary.txt')
@@ -114,7 +129,7 @@ for ax, (key, title, color) in zip(axes, DIST):
     ax.set_axisbelow(True)
 axes[-1].set_xlabel('latency (ns)', color=INK2)
 fig.suptitle(f'NIC latency distribution, Solarflare X4 loopback '
-             f'(n={len(d):,}, 10 ns bins)', x=0.01, ha='left', fontsize=12,
+             f'(n={len(d):,}, 10 ns bins, {mode_label})', x=0.01, ha='left', fontsize=12,
              color=INK)
 fig.tight_layout()
 fig.savefig(os.path.join(outdir, 'distribution.png'), dpi=150,
